@@ -1,0 +1,387 @@
+clc;
+clear all;
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Start Calculate Moment of Inertia with Manipulator %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+% Manipulator configuration and material selection
+manipulator_state = 1;  % 0 = retracted, 1 = fully extended, 0.5 = intermediate
+material_choice = 1;  % 1 = Aluminum, 2 = Ultem 2300, 3 = Ultem 9085
+forearm_length = 0.15;  % Example length, adjust based on actual dimensions
+
+% Mass data from the image (in grams, converted to kg)
+mass_aluminum = 352.86 / 1000;  % Aluminum arm + plastic gripper
+mass_ultem2300 = 269.15 / 1000;  % Ultem 2300 arm + plastic gripper
+mass_ultem9085 = 257.33 / 1000;  % Ultem 9085 arm + plastic gripper
+
+% Select the correct mass based on material choice
+switch material_choice
+    case 1
+        mass_manipulator = mass_aluminum;
+    case 2
+        mass_manipulator = mass_ultem2300;
+    case 3
+        mass_manipulator = mass_ultem9085;
+end
+
+% Adjust moments of inertia based on manipulator configuration
+if manipulator_state == 0
+    % Arm retracted (closed) - minimal inertia change
+    Ixx = 0.153;
+    Iyy = 0.143;
+    Izz = 0.162;
+elseif manipulator_state == 1
+    % Arm fully extended (open) - increased inertia due to extended mass
+    Ixx = 0.153 + mass_manipulator * (forearm_length^2);  % Approximation
+    Iyy = 0.143 + mass_manipulator * (forearm_length^2);  % Approximation
+    Izz = 0.162 + mass_manipulator * (forearm_length^2);  % Approximation
+elseif manipulator_state == 0.5
+    % Arm partially extended - intermediate inertia
+    Ixx = 0.153 + 0.5 * mass_manipulator * (forearm_length^2);
+    Iyy = 0.143 + 0.5 * mass_manipulator * (forearm_length^2);
+    Izz = 0.162 + 0.5 * mass_manipulator * (forearm_length^2);
+end
+
+% Update inertia matrix
+I = diag([Ixx, Iyy, Izz]);
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% End Calculate Moment of Inertia with Manipulator %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Start Determined Gain of PID %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Allowable error in radians (e.g., 1 degree in radians)
+angular_error = deg2rad(1);  % 1 degree allowable error
+
+% Maximum torque produced by thrusters (estimated, in Nm)
+torque_x = 0.05;  % Nm for X-axis
+torque_y = 0.05;  % Nm for Y-axis
+torque_z = 0.05;  % Nm for Z-axis
+
+% Calculate proportional gain (Kp) for each axis
+Kp_x = torque_x / angular_error;  % Proportional gain for X-axis
+Kp_y = torque_y / angular_error;  % Proportional gain for Y-axis
+Kp_z = torque_z / angular_error;  % Proportional gain for Z-axis
+
+% Calculate critical damping coefficient for each axis
+damping_x = 2 * sqrt(I(1,1) * Kp_x);  % Critical damping for X-axis
+damping_y = 2 * sqrt(I(2,2) * Kp_y);  % Critical damping for Y-axis
+damping_z = 2 * sqrt(I(3,3) * Kp_z);  % Critical damping for Z-axis
+
+
+% % Assume small damping coefficients for estimation (could be refined)
+% damping_x = 0.01; % Damping in X (rotational)
+% damping_y = 0.01; % Damping in Y (rotational)
+% damping_z = 0.01; % Damping in Z (rotational)
+
+
+% Define the transfer functions for each rotational axis (simplified second-order systems)
+sys_x = tf([1], [I(1,1), damping_x, 0]);
+sys_y = tf([1], [I(2,2), damping_y, 0]);
+sys_z = tf([1], [I(3,3), damping_z, 0]);
+
+% Automatically tune the PID controllers for each axis
+[pid_x, info_x] = pidtune(sys_x, 'PID');
+[pid_y, info_y] = pidtune(sys_y, 'PID');
+[pid_z, info_z] = pidtune(sys_z, 'PID');
+
+
+% Updated PID gains for each axis
+Kp_rot = [num2str(pid_x.Kp),  num2str(pid_y.Kp), num2str(pid_z.Kp)];  % Proportional gains for X, Y, Z
+Ki_rot = [num2str(pid_x.Ki), num2str(pid_y.Ki), num2str(pid_z.Ki)];  % Integral gains for X, Y, Z
+Kd_rot = [num2str(pid_x.Kd), num2str(pid_y.Kd), num2str(pid_z.Kd)];  % Derivative gains for X, Y, Z
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% End Determined Gain of PID %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+% Initial Euler angles (in degrees)
+psi0 = 0;  % Initial yaw
+theta0 = 0;  % Initial pitch
+phi0 = 0;  % Initial roll
+
+% Convert initial Euler angles to quaternion
+q0 = eul2quat(deg2rad([psi0, theta0, phi0]));  % [qw, qx, qy, qz]
+
+% Desired Euler angles (in degrees)
+psi = 10;  % Desired yaw
+theta = 8;  % Desired pitch
+phi = 19;  % Desired roll
+
+% Convert desired Euler angles to quaternion
+q_des = eul2quat(deg2rad([psi, theta, phi]));  % [qw, qx, qy, qz]
+
+
+% Initialize PID integral terms for each axis
+integral_error_rot = [0; 0; 0];
+
+% Time span for simulation
+tspan = [0 100];  % Simulation time (seconds)
+
+% Solver options
+opts = odeset('RelTol',1e-6,'AbsTol',1e-6);
+
+% Initial angular velocity (no initial motion)
+w0 = [0; 0; 0];  % Angular velocity (rad/s)
+
+% Thruster positions based on the diagrams provided
+thruster_positions = [
+     0.15,    0.10,  -0.05;          % F1 (Top-right-front corner)
+     0.15,   -0.10,   0.05;          % F2 (Top-left-front corner)
+    -0.15,   -0.10,  -0.05;          % F3 (Top-right-back corner)
+    -0.15,    0.10    0.05;          % F4 (Top-left-back corner)
+    -0.075,   0.10,   0.15;          % F5 (Bottom-right-front corner)
+     0.075,  -0.10,   0.15;          % F6 (Bottom-left-front corner)
+     0.075,   0.10,  -0.15;          % F7 (Bottom-right-back corner)
+    -0.075,  -0.10,  -0.15;          % F8 (Bottom-left-back corner)
+    -0.075,   0.15,  -0.075;         % F9 (Right-center)
+     0.075,   0.15,   0.075;         % F10 (Left-center)
+    -0.075,  -0.15   -0.075;         % F11 (Top-center)
+     0.075,  -0.15,   0.075;         % F12 (Bottom-center)
+];
+
+% Thruster force vectors based on their orientation from the drawings
+thruster_forces = [
+    1,  0,  0;  % F1 (thrust in +X direction)
+    1,  0,  0;  % F2 (thrust in -X direction)
+   -1,  0,  0;  % F3 (thrust in +Y direction)
+   -1,  0,  0;  % F4 (thrust in -Y direction)
+    0,  0,  1;  % F5 (thrust in +X direction)
+    0,  0,  1;  % F6 (thrust in -X direction)
+    0,  0, -1;  % F7 (thrust in +X direction)
+    0,  0, -1;  % F8 (thrust in -X direction)
+    0,  1,  0;  % F9 (thrust in +Z direction)
+    0,  1,  0;  % F10 (thrust in +Z direction)
+    0, -1,  0;  % F11 (thrust in +Z direction)
+    0, -1,  0;  % F12 (thrust in +Z direction)
+];
+
+
+
+% Calculate torque produced by each thruster (r x F)
+thruster_torques = zeros(size(thruster_positions));
+for i = 1:size(thruster_positions, 1)
+    thruster_torques(i, :) = cross(thruster_positions(i, :), thruster_forces(i, :));
+end
+
+% Solve ODE for rotational dynamics with PID control
+[t, x] = ode45(@(t, x) astrobee_rotational_dynamics(t, x, q_des, Kp_rot, Ki_rot, Kd_rot, I, integral_error_rot, thruster_torques), tspan, [w0; q0'], opts);
+
+% Extract angular velocity and quaternion from results
+angular_velocity = x(:, 1:3);
+quaternion = x(:, 4:7);
+
+% Convert quaternion to Euler angles for plotting
+euler_angles = quat2eul(quaternion);  % Extract Euler angles [psi, theta, phi] in radians
+euler_angles = rad2deg(euler_angles);  % Convert to degrees
+
+% Desired Euler angles in a matrix for plotting (same value throughout time)
+desired_euler_angles = repmat([psi, theta, phi], length(t), 1);
+%%
+% Plot the results
+figure(1);
+
+% Plot Yaw (ψ) over time
+subplot(4,1,1);
+plot(t, euler_angles(:,1), 'b', 'LineWidth', 1.5); hold on;
+plot(t, desired_euler_angles(:,1), 'r--', 'LineWidth', 1.5); 
+title('Yaw (ψ) Over Time');
+xlabel('Time (s)');
+ylabel('Yaw (degrees)');
+legend('Yaw (ψ)', 'Desired Yaw (ψ)');
+grid on;
+
+% Plot Pitch (θ) over time
+subplot(4,1,2);
+plot(t, euler_angles(:,2), 'b', 'LineWidth', 1.5); hold on;
+plot(t, desired_euler_angles(:,2), 'r--', 'LineWidth', 1.5); 
+title('Pitch (θ) Over Time');
+xlabel('Time (s)');
+ylabel('Pitch (degrees)');
+legend('Pitch (θ)', 'Desired Pitch (θ)');
+grid on;
+
+% Plot Roll (φ) over time
+subplot(4,1,3);
+plot(t, euler_angles(:,3), 'b', 'LineWidth', 1.5); hold on;
+plot(t, desired_euler_angles(:,3), 'r--', 'LineWidth', 1.5); 
+title('Roll (φ) Over Time');
+xlabel('Time (s)');
+ylabel('Roll (degrees)');
+legend('Roll (φ)', 'Desired Roll (φ)');
+grid on;
+
+% Plot Quaternion components over time
+subplot(4,1,4);
+plot(t, quaternion);
+title('Quaternion (Orientation) Over Time');
+xlabel('Time (s)');
+ylabel('Quaternion components');
+legend('qw', 'qx', 'qy', 'qz');
+grid on;
+
+%%
+% Plot angular velocity components over time
+figure(2);
+subplot(3,1,1);
+plot(t, angular_velocity(:,1), 'LineWidth', 1.5);
+title('Angular Velocity - Roll (\omega_x)');
+xlabel('Time (s)');
+ylabel('Angular Velocity (rad/s)');
+grid on;
+
+subplot(3,1,2);
+plot(t, angular_velocity(:,2), 'LineWidth', 1.5);
+title('Angular Velocity - Pitch (\omega_y)');
+xlabel('Time (s)');
+ylabel('Angular Velocity (rad/s)');
+grid on;
+
+subplot(3,1,3);
+plot(t, angular_velocity(:,3), 'LineWidth', 1.5);
+title('Angular Velocity - Yaw (\omega_z)');
+xlabel('Time (s)');
+ylabel('Angular Velocity (rad/s)');
+grid on;
+
+%%
+% Plot thruster torque components over time
+% figure(3);
+% subplot(3,1,1);
+% plot(t, thruster_torques(:,1), 'LineWidth', 1.5);
+% title('Thruster Torque - X Axis');
+% xlabel('Time (s)');
+% ylabel('Torque (Nm)');
+% grid on;
+% 
+% subplot(3,1,2);
+% plot(t, thruster_torques(:,2), 'LineWidth', 1.5);
+% title('Thruster Torque - Y Axis');
+% xlabel('Time (s)');
+% ylabel('Torque (Nm)');
+% grid on;
+% 
+% subplot(3,1,3);
+% plot(t, thruster_torques(:,3), 'LineWidth', 1.5);
+% title('Thruster Torque - Z Axis');
+% xlabel('Time (s)');
+% ylabel('Torque (Nm)');
+% grid on;
+%%
+% Plot control effort from PID (torques)
+% figure(4);
+% subplot(3,1,1);
+% plot(t, T_control(:,1), 'LineWidth', 1.5);
+% title('Control Effort - X Axis');
+% xlabel('Time (s)');
+% ylabel('Torque (Nm)');
+% grid on;
+% 
+% subplot(3,1,2);
+% plot(t, T_control(:,2), 'LineWidth', 1.5);
+% title('Control Effort - Y Axis');
+% xlabel('Time (s)');
+% ylabel('Torque (Nm)');
+% grid on;
+% 
+% subplot(3,1,3);
+% plot(t, T_control(:,3), 'LineWidth', 1.5);
+% title('Control Effort - Z Axis');
+% xlabel('Time (s)');
+% ylabel('Torque (Nm)');
+% grid on;
+
+%%
+% Function to compute rotational dynamics with PID control and thrusters
+function dx = astrobee_rotational_dynamics(t, x, q_des, Kp_rot, Ki_rot, Kd_rot, I, integral_error_rot, thruster_torques)
+    % Extract state variables
+    w = x(1:3);   % Angular velocity (rad/s)
+    q = x(4:7);   % Quaternion (orientation)
+
+    % PID control for rotation (torque demand from controller)
+    T_control = rotational_control(q, q_des, Kp_rot, Ki_rot, Kd_rot, integral_error_rot, w);
+    % Thruster contribution to torque (map the desired torque to thrusters)
+    T_thrusters = compute_thruster_torque(T_control, thruster_torques);
+    
+   % Human interaction (sudden push)
+    if t > 4 && t < 4.1  % Example: simulate a sudden push at 4 seconds
+        human_interaction_disturbance = [0.15; 0.12; -0.11];  % Impulse torque in Nm
+    else
+        human_interaction_disturbance = [0; 0; 0];
+    end
+    
+    % Rotational dynamics (Euler's equation)
+    w_dot = inv(I) * (T_thrusters+human_interaction_disturbance - cross(w, I*w));  % Angular acceleration (rad/s²)
+    % Quaternion kinematics
+    Omega = [0, -w(1), -w(2), -w(3);
+             w(1), 0, w(3), -w(2);
+             w(2), -w(3), 0, w(1);
+             w(3), w(2), -w(1), 0];
+    q_dot = 0.5 * Omega * q;
+
+    % State derivative
+    dx = [w_dot; q_dot];
+end
+
+%% Function to compute the torque contribution from thrusters
+function T_thrusters = compute_thruster_torque(T_control, thruster_torques)
+    % Initialize the total torque from thrusters
+    T_thrusters = zeros(3, 1);
+
+    % Maximum allowed thrust (torque) per axis
+    max_thruster_torque_x = 0.05;  % Max torque for X-axis thrusters (Nm)
+    max_thruster_torque_y = 0.05;  % Max torque for Y-axis thrusters (Nm)
+    max_thruster_torque_z = 0.05;  % Max torque for Z-axis thrusters (Nm)
+
+    % Separate the torque contributions for each axis
+    T_x = 0;
+    T_y = 0;
+    T_z = 0;
+
+    % Sum up the torque contributions from each thruster for each axis
+    for i = 1:size(thruster_torques, 1)
+        T_x = T_x + thruster_torques(i, 1) * dot(thruster_torques(i, :), T_control) / norm(thruster_torques(i, :))^2;
+        T_y = T_y + thruster_torques(i, 2) * dot(thruster_torques(i, :), T_control) / norm(thruster_torques(i, :))^2;
+        T_z = T_z + thruster_torques(i, 3) * dot(thruster_torques(i, :), T_control) / norm(thruster_torques(i, :))^2;
+    end
+
+    % Apply the torque limits for each axis
+    T_x = min(max(T_x, -max_thruster_torque_x), max_thruster_torque_x);
+    T_y = min(max(T_y, -max_thruster_torque_y), max_thruster_torque_y);
+    T_z = min(max(T_z, -max_thruster_torque_z), max_thruster_torque_z);
+
+    % Store the torques in the output vector
+    T_thrusters = [T_x; T_y; T_z];
+end
+
+
+%% Rotational PID control (Quaternion control)
+function T_control = rotational_control(q, q_des, Kp_rot, Ki_rot, Kd_rot, integral_error_rot, w)
+    % Quaternion error
+    q_error = quatmultiply(q_des', quatinv(q'));
+    angle_error = 2 * atan2(norm(q_error(2:4)), q_error(1));
+    axis_error = q_error(2:4) / norm(q_error(2:4) + 1e-6);  % Avoid division by zero
+
+    % Calculate torque error for each axis using PID control
+    torque_error = angle_error * axis_error;
+    integral_error_rot = integral_error_rot + torque_error;  % Update integral term
+    error_w = -w;  % Angular velocity error
+    
+    % PID control for each axis (torque control)
+    T_control = [
+        Kp_rot(1) * torque_error(1) + Ki_rot(1) * integral_error_rot(1) + Kd_rot(1) * error_w(1);
+        Kp_rot(2) * torque_error(2) + Ki_rot(2) * integral_error_rot(2) + Kd_rot(2) * error_w(2);
+        Kp_rot(3) * torque_error(3) + Ki_rot(3) * integral_error_rot(3) + Kd_rot(3) * error_w(3);
+    ];
+end
+
+%% Quaternion multiplication function
+function q_out = quatmultiply(q1, q2)
+    % Quaternion multiplication of q1 and q2
+    w1 = q1(1); x1 = q1(2); y1 = q1(3); z1 = q1(4);
+    w2 = q2(1); x2 = q2(2); y2 = q2(3); z2 = q2(4);
+    
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2;
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2;
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2;
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2;
+    
+    q_out = [w; x; y; z];
+end
